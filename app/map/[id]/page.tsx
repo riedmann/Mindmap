@@ -23,10 +23,15 @@ import { db } from "@/lib/firebase";
 import { useAuth } from "@/components/AuthProvider";
 
 function EditableNode({ id, data }: NodeProps) {
-  const { onChange, onAdd } = data as {
-    onChange?: (id: string, v: string) => void;
-    onAdd?: (id: string) => void;
-  };
+  const { onChange, onAdd, onToggle, onDelete, hasChildren, collapsed } =
+    data as {
+      onChange?: (id: string, v: string) => void;
+      onAdd?: (id: string) => void;
+      onToggle?: (id: string) => void;
+      onDelete?: (id: string) => void;
+      hasChildren?: boolean;
+      collapsed?: boolean;
+    };
   return (
     <div className="mm-node">
       <Handle id="tl" type="target" position={Position.Left} />
@@ -34,18 +39,34 @@ function EditableNode({ id, data }: NodeProps) {
       <span className="grab" title="Drag to move">
         ⠿
       </span>
-      <input
-        className="nodrag"
-        onFocus={(e) => e.currentTarget.select()}
-        value={(data as { label: string }).label}
-        onChange={(e) => onChange?.(id, e.target.value)}
-      />
       <button
         className="nodrag add"
         title="Add child"
         onClick={() => onAdd?.(id)}
       >
         +
+      </button>
+      <input
+        className="nodrag"
+        onFocus={(e) => e.currentTarget.select()}
+        value={(data as { label: string }).label}
+        onChange={(e) => onChange?.(id, e.target.value)}
+      />
+      {hasChildren && (
+        <button
+          className="nodrag secondary toggle"
+          title={collapsed ? "Expand" : "Collapse"}
+          onClick={() => onToggle?.(id)}
+        >
+          {collapsed ? "▸" : "▾"}
+        </button>
+      )}
+      <button
+        className="nodrag secondary toggle"
+        title="Delete"
+        onClick={() => onDelete?.(id)}
+      >
+        🗑
       </button>
       <Handle id="sr" type="source" position={Position.Right} />
       <Handle id="tr" type="target" position={Position.Right} />
@@ -61,7 +82,10 @@ const clean = (nodes: Node[]) =>
     id: n.id,
     type: "editable",
     position: n.position,
-    data: { label: (n.data as { label: string }).label },
+    data: {
+      label: (n.data as { label: string }).label,
+      ...((n.data as { collapsed?: boolean }).collapsed && { collapsed: true }),
+    },
   }));
 const cleanEdges = (edges: Edge[]) =>
   edges.map((e) => ({
@@ -99,6 +123,18 @@ function MapEditor() {
       setNodes((ns) =>
         ns.map((n) =>
           n.id === nodeId ? { ...n, data: { ...n.data, label } } : n,
+        ),
+      ),
+    [setNodes],
+  );
+
+  const onToggle = useCallback(
+    (nodeId: string) =>
+      setNodes((ns) =>
+        ns.map((n) =>
+          n.id === nodeId
+            ? { ...n, data: { ...n.data, collapsed: !n.data.collapsed } }
+            : n,
         ),
       ),
     [setNodes],
@@ -184,7 +220,11 @@ function MapEditor() {
       dir = siblings - left > left ? -1 : 1;
     }
     setNodes((ns) => [
-      ...ns.map((n) => ({ ...n, selected: false })),
+      ...ns.map((n) => ({
+        ...n,
+        selected: false,
+        ...(n.id === selected?.id && { data: { ...n.data, collapsed: false } }),
+      })),
       {
         id: newId,
         type: "editable",
@@ -204,6 +244,29 @@ function MapEditor() {
           targetHandle: dir === 1 ? "tl" : "tr",
         },
       ]);
+  };
+
+  const deleteNode = (nodeId: string) => {
+    // Removing a node also removes everything below it
+    const gone = new Set([nodeId]);
+    for (let grew = true; grew; ) {
+      grew = false;
+      edges.forEach((e) => {
+        if (gone.has(e.source) && !gone.has(e.target)) {
+          gone.add(e.target);
+          grew = true;
+        }
+      });
+    }
+    if (
+      gone.size > 1 &&
+      !confirm(`Delete this node and ${gone.size - 1} below it?`)
+    )
+      return;
+    setNodes((ns) => ns.filter((n) => !gone.has(n.id)));
+    setEdges((es) =>
+      es.filter((e) => !gone.has(e.source) && !gone.has(e.target)),
+    );
   };
 
   const autoLayout = () => {
@@ -256,9 +319,7 @@ function MapEditor() {
       cursor = Math.max(...ys) + off + 120;
     };
 
-    nodes
-      .filter((n) => !hasParent.has(n.id))
-      .forEach((n) => layoutRoot(n.id));
+    nodes.filter((n) => !hasParent.has(n.id)).forEach((n) => layoutRoot(n.id));
     nodes.filter((n) => !seen.has(n.id)).forEach((n) => layoutRoot(n.id));
 
     const laidOut = tree.map((e) => {
@@ -274,11 +335,88 @@ function MapEditor() {
     setTimeout(() => flow.current?.fitView({ duration: 300 }), 50);
   };
 
+  // Everything below a collapsed node is hidden
+  const hidden = new Set<string>();
+  const kidsOf = new Map<string, string[]>();
+  edges.forEach((e) => {
+    if (e.source !== e.target)
+      kidsOf.set(e.source, [...(kidsOf.get(e.source) ?? []), e.target]);
+  });
+  const hide = (nid: string) =>
+    (kidsOf.get(nid) ?? []).forEach((k) => {
+      if (hidden.has(k)) return;
+      hidden.add(k);
+      hide(k);
+    });
+  nodes.forEach((n) => n.data.collapsed && hide(n.id));
+
   const displayNodes = nodes.map((n) => ({
     ...n,
+    hidden: hidden.has(n.id),
     dragHandle: ".grab",
-    data: { ...n.data, onChange: onLabelChange, onAdd: addNode },
+    data: {
+      ...n.data,
+      onChange: onLabelChange,
+      onAdd: addNode,
+      onToggle,
+      onDelete: deleteNode,
+      hasChildren: kidsOf.has(n.id),
+    },
   }));
+  const displayEdges = edges.map((e) => ({
+    ...e,
+    hidden: hidden.has(e.source) || hidden.has(e.target),
+  }));
+
+  // Dropping a node onto another makes it a child of that node
+  const onNodeDragStop = (_: unknown, dragged: Node) => {
+    const below = new Set<string>();
+    const walk = (x: string) =>
+      (kidsOf.get(x) ?? []).forEach((k) => {
+        if (below.has(k)) return;
+        below.add(k);
+        walk(k);
+      });
+    walk(dragged.id);
+
+    const cx = dragged.position.x + (dragged.measured?.width ?? 230) / 2;
+    const cy = dragged.position.y + (dragged.measured?.height ?? 45) / 2;
+    const target = nodes.find(
+      (n) =>
+        n.id !== dragged.id &&
+        !hidden.has(n.id) &&
+        !below.has(n.id) &&
+        cx >= n.position.x &&
+        cx <= n.position.x + (n.measured?.width ?? 230) &&
+        cy >= n.position.y &&
+        cy <= n.position.y + (n.measured?.height ?? 45),
+    );
+    if (!target) return;
+
+    const dir = dragged.position.x >= target.position.x ? 1 : -1;
+    const siblings = (kidsOf.get(target.id) ?? []).filter(
+      (k) => k !== dragged.id,
+    ).length;
+    const dx = target.position.x + dir * 340 - dragged.position.x;
+    const dy = target.position.y + siblings * 80 - dragged.position.y;
+    setNodes((ns) =>
+      ns.map((n) =>
+        n.id === dragged.id || below.has(n.id)
+          ? { ...n, position: { x: n.position.x + dx, y: n.position.y + dy } }
+          : n,
+      ),
+    );
+    setEdges((es) => [
+      ...es.filter((e) => e.target !== dragged.id),
+      {
+        id: crypto.randomUUID(),
+        source: target.id,
+        target: dragged.id,
+        sourceHandle: dir === 1 ? "sr" : "sl",
+        targetHandle: dir === 1 ? "tl" : "tr",
+      },
+    ]);
+  };
 
   if (!ready) return <main className="center">Loading…</main>;
 
@@ -300,11 +438,12 @@ function MapEditor() {
       <ReactFlow
         onInit={(i) => (flow.current = i)}
         nodes={displayNodes}
-        edges={edges}
+        edges={displayEdges}
         nodeTypes={nodeTypes}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
+        onNodeDragStop={onNodeDragStop}
         fitView
       >
         <Background />
