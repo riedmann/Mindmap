@@ -82,6 +82,9 @@ function MapEditor() {
   const [ready, setReady] = useState(false);
   const [saving, setSaving] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flow = useRef<{
+    fitView: (o?: { duration: number }) => unknown;
+  } | null>(null);
 
   const onLabelChange = useCallback(
     (nodeId: string, label: string) =>
@@ -134,7 +137,8 @@ function MapEditor() {
   }, [nodes, edges, title, ready, id]);
 
   const onConnect = useCallback(
-    (c: Connection) => setEdges((es) => addEdge(c, es)),
+    (c: Connection) =>
+      c.source !== c.target && setEdges((es) => addEdge(c, es)),
     [setEdges],
   );
 
@@ -163,6 +167,33 @@ function MapEditor() {
       ]);
   };
 
+  const autoLayout = () => {
+    // Self-loops make a node its own parent, which hides the real root
+    const tree = edges.filter((e) => e.source !== e.target);
+    const children = new Map<string, string[]>();
+    tree.forEach((e) =>
+      children.set(e.source, [...(children.get(e.source) ?? []), e.target]),
+    );
+    const hasParent = new Set(tree.map((e) => e.target));
+    const pos = new Map<string, { x: number; y: number }>();
+    let row = 0;
+    const place = (nid: string, depth: number): number => {
+      pos.set(nid, { x: depth * 340, y: 0 });
+      const kids = (children.get(nid) ?? []).filter((k) => !pos.has(k));
+      const ys = kids.map((k) => place(k, depth + 1));
+      const y = ys.length ? (ys[0] + ys[ys.length - 1]) / 2 : row++ * 80;
+      // Extra gap after a branch so sibling subtrees stay visually separate
+      if (ys.length) row += 0.6;
+      pos.set(nid, { x: depth * 340, y });
+      return y;
+    };
+    nodes.filter((n) => !hasParent.has(n.id)).forEach((n) => place(n.id, 0));
+    nodes.filter((n) => !pos.has(n.id)).forEach((n) => place(n.id, 0));
+    setEdges(tree);
+    setNodes((ns) => ns.map((n) => ({ ...n, position: pos.get(n.id)! })));
+    setTimeout(() => flow.current?.fitView({ duration: 300 }), 50);
+  };
+
   const displayNodes = nodes.map((n) => ({
     ...n,
     dragHandle: ".grab",
@@ -181,9 +212,13 @@ function MapEditor() {
           onChange={(e) => setTitle(e.target.value)}
         />
         <button onClick={() => addNode()}>+ Add child</button>
+        <button className="secondary" onClick={autoLayout}>
+          Auto layout
+        </button>
         <span className="status">{saving ? "Saving…" : "Saved"}</span>
       </header>
       <ReactFlow
+        onInit={(i) => (flow.current = i)}
         nodes={displayNodes}
         edges={edges}
         nodeTypes={nodeTypes}
