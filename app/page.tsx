@@ -10,7 +10,6 @@ import {
   deleteDoc,
   doc,
   onSnapshot,
-  orderBy,
   query,
   serverTimestamp,
   where,
@@ -31,10 +30,18 @@ export default function Home() {
     const q = query(
       collection(db, "mindmaps"),
       where("ownerId", "==", user.uid),
-      orderBy("updatedAt", "desc"),
     );
     return onSnapshot(q, (snap) =>
-      setMaps(snap.docs.map((d) => ({ id: d.id, title: d.data().title }))),
+      setMaps(
+        snap.docs
+          .map((d) => ({
+            id: d.id,
+            title: d.data().title,
+            // Pending server timestamps are null locally; treat them as newest
+            updated: d.data().updatedAt?.toMillis() ?? Date.now(),
+          }))
+          .sort((a, b) => b.updated - a.updated),
+      ),
     );
   }, [user]);
 
